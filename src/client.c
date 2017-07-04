@@ -11,6 +11,7 @@
 #define OK 0
 #define NO_INPUT 1
 #define TOO_LONG 2
+#define EXIT 3
 
 static int getLine(char *prompt, char *buffer, int size);
 
@@ -47,22 +48,28 @@ int main(int argc, char* argv[]) {
     printf("%s\n", mesgIn);
     
     while (1) {
-        // Get input and validate
+        // Clear memory buffers
         memset(mesgIn, '\0', MESG_SIZE*sizeof(char));
         memset(mesgOut, '\0', MESG_SIZE*sizeof(char));
+        
+        // Get input and validate
         rc = getLine(prompt, mesgOut, MESG_SIZE);
         if (rc == NO_INPUT) {
             printf("No input\n");
             continue;
         }
-        if (rc == TOO_LONG) {
+        else if (rc == TOO_LONG) {
             printf(prompt, mesgOut);
             continue;
         }
+        else if (rc == EXIT) {
+            break;
+        }
+        else {
+            // Write to server
+            send(clientSocket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
+        }
         
-        // Write to server
-        
-        send(clientSocket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
         // Read from server
         if (read(clientSocket, mesgIn, MESG_SIZE) <= 1) {
             continue;
@@ -70,6 +77,7 @@ int main(int argc, char* argv[]) {
         printf("%s", mesgIn);
     }
     close(clientSocket);
+    puts("\nDisconnected.\n");
     
     return 0;
 }
@@ -83,12 +91,19 @@ static int getLine(char prompt[], char buffer[], int size) {
         printf("%s", prompt);
         fflush(stdout);
     }
+    
     // Get input
     fgets(buffer, size, stdin);
+    
     // Handle input
+    if (strcmp(buffer, "exit\n") == 0) {
+        return EXIT;
+    }
     if (strcmp(buffer, "\n") == 0 || buffer == NULL) {
         return NO_INPUT;
     }
+    
+    // Ensure newline
     if (buffer[strlen(buffer) - 1] != '\n') {
         extra = 0;
         while (((ch = getchar()) != '\n') && (ch != EOF)) {
@@ -96,6 +111,7 @@ static int getLine(char prompt[], char buffer[], int size) {
         }
         return (extra == 1) ? TOO_LONG : OK;
     }
+    // Ensure null-termination
     buffer[strlen(buffer) - 1] = '\0';
     
     return OK;
