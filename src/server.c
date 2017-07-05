@@ -7,8 +7,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define _GNU_SOURCE
-
 #define MAX_WEBSITES 10             // Maximum number of Websites to ping per handle
 #define NUM_WORKER_THREADS 5        // Number of worker threads
 #define NUM_PINGS_PER_SITE 10       // Number of times to ping site
@@ -19,19 +17,14 @@
 /***************************************************************************************************
  * Global variables
  **************************************************************************************************/
-// Global recursive mutex
-pthread_mutex_t requestMutex;
-pthread_mutexattr_t attr;
+// Global mutex and condition signals
+pthread_mutex_t queueMutex;                                 // Mutex for altering HandleNodes
+pthread_mutexattr_t init;                                   // Needed for recursive mutex
+pthread_cond_t gotRequest = PTHREAD_COND_INITIALIZER;       // Signal threads of pending request
+pthread_cond_t noRequests = PTHREAD_COND_INITIALIZER;       // Signal threads of no requests pending
 
-// Global condition variable
-pthread_cond_t gotRequest = PTHREAD_COND_INITIALIZER;
-pthread_cond_t noRequests = PTHREAD_COND_INITIALIZER;
-
-// Number of pending requests
-static int numRequests = 0;
-
-// Global variable for creating unique handles for requests
-static int handleCounter = 0;
+static int handleID = 0;        // Handle ID for clients
+static int numRequests = 0;     // Number of pending requests
 
 // Global variables for identifying clients
 static int clientID = 0;
@@ -41,32 +34,34 @@ struct SocketData {
     int *socketDesc;
 };
 
-// Linked-list (queue) of Website structures for keeping track of each website's data
-struct Website {
+// Linked-list (queue) of handles
+static int handleListSize = 0;
+struct HandleNode {
     unsigned int handle;
-    //unsigned short numOfSitesInHandle;
+    struct HandleNode *nextHandleNode;
+    struct WebsiteElement *websites[MAX_WEBSITES];
+};
+struct HandleNode *queueHead = NULL;           // Pointer to head of handle queue
+struct HandleNode *firstHandleInQueue = NULL;   // Pointer to first handle in the queue
+struct HandleNode *lastHandleInQueue = NULL;    // Pointer to last handle in the queue
+
+// Linked-list (queue) of Website structures for keeping track of each handle's data
+struct WebsiteElement {
+    unsigned int handle;
     char url[50];
     short avgPing;
     short minPing;
     short maxPing;
     char status[10];
-    struct Website *nextWebsiteInQueue;
 };
-struct Website *queueHead = NULL;             // Pointer to head of queue
-struct Website *firstWebsiteInQueue = NULL;   // Pointer to first website in the queue
-struct Website *lastWebsiteInQueue = NULL;    // Pointer to last website in the queue
-static int websiteListSize = 0;
+
 
 /***************************************************************************************************
  * Prototypes
  **************************************************************************************************/
-void addWebsitesToQueue(
-    struct Website *siteList[], 
-    int size, 
-    pthread_mutex_t *pmtx, 
-    pthread_cond_t *pcond);
-struct Website* getWebsiteFromQueue(pthread_mutex_t *pmtx);
-void pingWebsite(struct Website *website);
+void addHandleNodeToQueue(struct HandleNode *hNode);
+struct HandleNode* getHandleNodeFromQueue(void);
+void pingWebsite(struct WebsiteElement *website);
 void* handleRequestsLoop(void *tid);
 void printReturnCode(int rc);
 void* connectionHandler(void *sockData);
@@ -80,9 +75,9 @@ void getHandleStatus(int handle, char *mesgOut);
 // Main function
 int main(int argc, char* argv[]) {
     // Initialize thread pool
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE_NP);
-    pthread_mutex_init(&requestMutex, &attr);
+    pthread_mutexattr_init(&init);
+    pthread_mutexattr_settype(&init, PTHREAD_MUTEX_RECURSIVE_NP);
+    pthread_mutex_init(&queueMutex, &init);
     pthread_t threadPool[NUM_WORKER_THREADS];
     
     // Create thread pool
@@ -151,52 +146,43 @@ int main(int argc, char* argv[]) {
  * Definitions
  **************************************************************************************************/
 // A function for adding a requested site to the queue
-void addWebsitesToQueue(
-struct Website *siteList[],
-int size,
-pthread_mutex_t *pmtx,
-pthread_cond_t *pcond) {
+void addHandleNodeToQueue(struct HandleNode *hNode) {
     int returnCode;
     
-    // Lock mutex to ensure exclusive access to queue before adding Website
-    returnCode = pthread_mutex_lock(pmtx);
+    // Lock mutex to ensure exclusive access to queue before adding HandleNode
+    returnCode = pthread_mutex_lock(&queueMutex);
     if (returnCode) {
         printReturnCode(returnCode);
     }
     
+    // If queue is empty, append first HandleNode
+    if (firstHandleInQueue == NULL) {
+        // Set queue head
+        if (handleListSize == 0) {
+            queueHead = hNode;
+        }
+        // Move first and last HandleNode in queue to next available request
+        firstHandleInQueue = lastHandleInQueue = hNode;
+    }
+    // Otherwise, append as usual
+    else {
+        lastHandleInQueue->nextHandleNode = hNode;
+        lastHandleInQueue = hNode;
+        lastHandleInQueue->nextHandleNode = NULL;
+    }
+    handleListSize++;
+    
+    // Add number of WebsiteElement requests
     int i = 0;
-    for (i=0; i<=size; i++) {
-        if (siteList[i] == NULL) {
-            break;
-        }
-        // If queue is empty, append first website
-        if (firstWebsiteInQueue == NULL) {
-            // Set queue head
-            if (websiteListSize == 0) {
-                queueHead = siteList[i];
-            }
-            // Move first and last website in queue to next available request
-            firstWebsiteInQueue = lastWebsiteInQueue = siteList[i];
-        }
-        // Otherwise, append as usual
-        else {
-            lastWebsiteInQueue->nextWebsiteInQueue = siteList[i];
-            lastWebsiteInQueue = siteList[i];
-            lastWebsiteInQueue->nextWebsiteInQueue = NULL;
-        }
+    while (hNode->websites[i] != NULL) {
         numRequests++;
-        websiteListSize++;
-        //printf("%s\n", siteList[i]->url);
-    }
-
-    // Unlock mutex
-    returnCode = pthread_mutex_unlock(pmtx);
-    if (returnCode) {
-        printReturnCode(returnCode);
+        i++;
     }
     
-    // Signal condition variable for threadpool
-    returnCode = pthread_cond_signal(pcond);
+    pthread_cond_broadcast(&gotRequest);
+    
+    // Unlock mutex
+    returnCode = pthread_mutex_unlock(&queueMutex);
     if (returnCode) {
         printReturnCode(returnCode);
     }
@@ -206,38 +192,33 @@ pthread_cond_t *pcond) {
 }
 
 // A function for getting a Website from queue
-struct Website* getWebsiteFromQueue(pthread_mutex_t *pmtx) {
+struct HandleNode* getHandleNodeFromQueue(void) {
     int returnCode;
     
     // Lock mutex to ensure exclusive access to queue
-    returnCode = pthread_mutex_lock(pmtx);
+    returnCode = pthread_mutex_lock(&queueMutex);
     if (returnCode) {
         printReturnCode(returnCode);
     }
     
-    struct Website *returnWebsite;
-    
-    returnWebsite = firstWebsiteInQueue;
-    firstWebsiteInQueue = firstWebsiteInQueue->nextWebsiteInQueue;
-    numRequests--;
-    if (numRequests == 0) {
-        pthread_cond_signal(&noRequests);
-        pthread_cond_wait(&gotRequest, &requestMutex);
+    struct HandleNode *hNode;
+    hNode = firstHandleInQueue;
+    if (firstHandleInQueue->nextHandleNode != NULL) {
+        firstHandleInQueue = firstHandleInQueue->nextHandleNode;
+        numRequests--;
     }
-    
-    printf("Thread %ld grabbed %s\n", pthread_self(), returnWebsite->url);
     
     // Unlock mutex
-    returnCode = pthread_mutex_unlock(pmtx);
+    returnCode = pthread_mutex_unlock(&queueMutex);
     if (returnCode) {
         printReturnCode(returnCode);
     }
     
-    return returnWebsite;
+    return hNode;
 }
 
 // A function to ping (/usr/bin/ping) Website and store its data. Need 'curl' and 'ping' installed
-void pingWebsite(struct Website *website) {
+void pingWebsite(struct WebsiteElement *website) {
     FILE *fp;
     char *validateURLCmd1 = "curl -Is ";        // First part of command for URL validation
     char *validateURLCmd2 = " | head -n 1";     // Second part of command for URL validation
@@ -324,20 +305,29 @@ void pingWebsite(struct Website *website) {
     website->maxPing = (int)pingData[2];
     strcpy(website->status, "COMPLETE");
     
+    numRequests--;
+    
     // Back to handleRequestsLoop()
     return;
 }
 
 // A loop for continuously handling requests from client
 void* handleRequestsLoop(void *tid) {
-    struct Website *website;
+    struct HandleNode *hNode;
     
     while (1) {
-        if (numRequests > 0) {
-            website = getWebsiteFromQueue(&requestMutex);
-            if (website) {
-                pingWebsite(website);
-            }
+        pthread_mutex_lock(&queueMutex);
+        while (!numRequests) {
+            puts("DEBUG");
+            pthread_cond_wait(&gotRequest, &queueMutex);
+        }
+        hNode = getHandleNodeFromQueue();
+        pthread_mutex_unlock(&queueMutex);
+        int i = 0;
+        while (hNode->websites[i] != NULL) {
+            //printf("Thread %ld grabbed %s\n", pthread_self(), hNode->websites[i]->url);
+            pingWebsite(hNode->websites[i]);
+            i++;
         }
     }
     
@@ -352,8 +342,8 @@ void printReturnCode(int rc) {
 
 // Handler routine for each client
 void* connectionHandler(void *sockData) {
-    struct SocketData *sData = (struct SocketData*)sockData;
-    int socket = *(int*)sData->socketDesc;
+    struct SocketData *socketData = (struct SocketData*)sockData;
+    int socket = *(int*)socketData->socketDesc;
     char mesgIn[MESG_SIZE];
     char mesgOut[MESG_SIZE];
     char command[MESG_SIZE];
@@ -383,7 +373,7 @@ void* connectionHandler(void *sockData) {
         memcpy(arg, &mesgIn[i], strlen(mesgIn));
         
         // Process information
-        handleCommand(command, arg, sData);
+        handleCommand(command, arg, socketData);
         
         // Clear memory buffers
         memset(mesgIn, '\0', MESG_SIZE*sizeof(char));
@@ -394,7 +384,7 @@ void* connectionHandler(void *sockData) {
     
     // Client disconnects
     printf("Client %d disconnected.\n", clientID);
-    free(sData);
+    free(socketData);
     numOfConnectedClients--;
     
     return 0;
@@ -403,7 +393,7 @@ void* connectionHandler(void *sockData) {
 // Takes command, validates and processes it
 void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
     struct SocketData *sData = (struct SocketData*)sockData;
-    int handle = -1;
+    int handle = 0;
     int socket = *(int*)sData->socketDesc;
     char mesgOut[MESG_SIZE];
     char temp1[MESG_SIZE];
@@ -431,6 +421,13 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
     else if (strcmp(cmd, "showHandles") == 0) {
     }
     else if (strcmp(cmd, "showHandleStatus") == 0) {
+        if (isdigit(arg)) {
+            handle = strtol(arg, NULL, 10);
+        }
+        else {
+            strcpy(mesgOut, "\n\n\tArgument is not an integer.\n\n");
+            return;
+        }
         getHandleStatus(handle, mesgOut);
         send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
     }
@@ -444,10 +441,6 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
 
 // Parses a list of websites entered by client and adds them to queue
 int parseWebsiteList(char *list) {
-    handleCounter++;
-    int handle = handleCounter;
-    struct Website *siteList[MAX_WEBSITES];
-    
     // Parse websites from list into separate URL strings
     char *parsedURLs[MAX_WEBSITES];
     const char *delim = ", \0";
@@ -460,77 +453,100 @@ int parseWebsiteList(char *list) {
         ptr = strtok(NULL, delim);
     }
     
-    // Create and initialize Website structures from list
-    for (i=0; i<MAX_WEBSITES; i++) {
+    // Lock mutex to ensure exclusive access to queue
+    int returnCode = 0;
+    
+    //returnCode = pthread_mutex_lock(&queueMutex);
+    //if (returnCode) {
+        //printReturnCode(returnCode);
+    //}
+    
+    // Create and initialize new HandleNode
+    struct HandleNode *hNode = malloc(sizeof(struct HandleNode));
+    handleID++;
+    hNode->handle = handleID;
+    
+    // Create and initialize WebsiteElement and add to hNode
+    int websiteListSize = i+1;
+    for (i=0; i<websiteListSize; i++) {
         // End of list, break
         if (parsedURLs[i] == NULL) {
             break;
         }
         
-        // Create new Website structure for element in list
-        struct Website *newWebsite = (struct Website*)malloc(sizeof(struct Website));
-        if (!newWebsite) {
-            fprintf(stderr, "addWebsitesToQueue: Out of memory!\n");
+        // Create new WebsiteNode for hNode
+        struct WebsiteElement *website = malloc(sizeof(struct WebsiteElement));
+        if (!website) {
+            fprintf(stderr, "addhNodeToQueue: Out of memory!\n");
             exit(1);
         }
         
-        // Initialize Website structure
-        newWebsite->handle = handle;
-        strcpy(newWebsite->url, parsedURLs[i]);
-        newWebsite->avgPing = -1;
-        newWebsite->minPing = -1;
-        newWebsite->maxPing = -1;
-        strcpy(newWebsite->status, "IN_QUEUE");
-        siteList[i] = newWebsite;
+        // Initialize WebsiteElement and add to hNode
+        website->handle = hNode->handle;
+        strcpy(website->url, parsedURLs[i]);
+        website->avgPing = -1;
+        website->minPing = -1;
+        website->maxPing = -1;
+        strcpy(website->status, "IN_QUEUE");
+        hNode->websites[i] = website;
     }
     
-    // Add *Website structure to queue
-    addWebsitesToQueue(siteList, i, &requestMutex, &gotRequest);
+    // Add hNode to queue
+    addHandleNodeToQueue(hNode);
     
-    return handle;
+    // Unlock mutex
+    //returnCode = pthread_mutex_lock(&queueMutex);
+    //if (returnCode) {
+        //printReturnCode(returnCode);
+    //}
+    
+    return handleID;
 }
 
 // Returns status of handle requested
 void getHandleStatus(int handle, char *mesgOut) {
-    struct Website *siteList[MAX_WEBSITES];
-    struct Website *itr = queueHead;
+    struct HandleNode *queueItr = queueHead;
+    struct WebsiteElement *websiteList[MAX_WEBSITES];
     
     // Empty list
-    if (itr == NULL) {
+    if (queueItr == NULL) {
         strcpy(mesgOut, "Nothing to show.\n");
         return;
     }
     
     // Loop through queue to find websites requested by handle and store into a list
-    int i;
-    int j = 0;
-    for (i=0; i<websiteListSize; i++) {
-        if (itr != NULL && itr->handle == handle) {
-            siteList[j] = itr;
-            j++;
+    while (queueItr != NULL) {
+        if (queueItr->handle == handle) {
+            int i = 0;
+            while (queueItr->websites[i] != NULL) {
+                websiteList[i] = queueItr->websites[i];
+                puts(queueItr->websites[i]->url);
+                i++;
+            }
+            break;
         }
-        itr = itr->nextWebsiteInQueue;
+        queueItr = queueItr->nextHandleNode;
     }
     
     // Store formatted status and return
     char temp[MESG_SIZE];
-    for (i=0; i<MAX_WEBSITES; i++) {
-        if (siteList[i] == NULL) {
-            break;
-        }
+    int i = 0;
+    while (websiteList[i] != NULL) {
         snprintf(
             temp,
             MESG_SIZE/MAX_WEBSITES,
-            "\n%d\t%s\t\t%d\t%d\t%d\t%s\n",
-            handle, siteList[i]->url, siteList[i]->avgPing,
-            siteList[i]->minPing, siteList[i]->maxPing, siteList[i]->status
+            "%d\t%s\t\t%d\t%d\t%d\t%s\n",
+            handle, websiteList[i]->url, websiteList[i]->avgPing,
+            websiteList[i]->minPing, websiteList[i]->maxPing, websiteList[i]->status
         );
         if (i == 0) {
-            strcpy(mesgOut, temp);
+            strcpy(mesgOut, "\n\n");
+            strcat(mesgOut, temp);
         }
         else {
             strcat(mesgOut, temp);
         }
+        i++;
     }
     strcat(mesgOut, "\n");
     
