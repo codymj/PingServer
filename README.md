@@ -1,2 +1,7 @@
-# ServerClient
-# ServerClient
+ServerClient
+===========
+
+Dependencies:
+------------
+curl
+ping

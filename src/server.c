@@ -21,10 +21,7 @@
 pthread_mutex_t queueMutex;                                 // Mutex for altering HandleNodes
 pthread_mutexattr_t init;                                   // Needed for recursive mutex
 pthread_cond_t gotRequest = PTHREAD_COND_INITIALIZER;       // Signal threads of pending request
-pthread_cond_t noRequests = PTHREAD_COND_INITIALIZER;       // Signal threads of no requests pending
-
-static int handleID = 0;        // Handle ID for clients
-static int numRequests = 0;     // Number of pending requests
+pthread_t threadPool[NUM_WORKER_THREADS];                   // Thread pool of workers
 
 // Global variables for identifying clients
 static int clientID = 0;
@@ -35,37 +32,46 @@ struct SocketData {
 };
 
 // Linked-list (queue) of handles
-static int handleListSize = 0;
+static int handleQueueSize = 0;
 struct HandleNode {
     unsigned int handle;
-    struct HandleNode *nextHandleNode;
-    struct WebsiteElement *websites[MAX_WEBSITES];
+    unsigned int pendingWebsiteNodes;
+    struct WebsiteNode *websiteHead;
+    struct WebsiteNode *firstWebsiteNodeInHandle;
+    struct WebsiteNode *lastWebsiteNodeInHandle;
+    struct HandleNode *nextHandleNodeInQueue;
 };
-struct HandleNode *queueHead = NULL;           // Pointer to head of handle queue
-struct HandleNode *firstHandleInQueue = NULL;   // Pointer to first handle in the queue
-struct HandleNode *lastHandleInQueue = NULL;    // Pointer to last handle in the queue
+struct HandleNode *queueHead = NULL;                // Pointer to head of handle queue
+struct HandleNode *firstHandleNodeInQueue = NULL;   // Pointer to first handle in the queue
+struct HandleNode *lastHandleNodeInQueue = NULL;    // Pointer to last handle in the queue
 
-// Linked-list (queue) of Website structures for keeping track of each handle's data
-struct WebsiteElement {
+// Linked-list of WebsiteNodes for keeping track of each HandleNode's data
+struct WebsiteNode {
     unsigned int handle;
     char url[50];
     short avgPing;
     short minPing;
     short maxPing;
     char status[10];
+    struct WebsiteNode *nextWebsiteNodeInHandle;
+    struct HandleNode *handleNodeParent;
 };
 
+static int handleID = 0;                // Handle ID for clients
+static int pendingHandleNodes = 0;      // HandleNodes pending for processing
+static int pendingWebsiteNodes = 0;     // WebsiteNodes pending for processing
 
 /***************************************************************************************************
  * Prototypes
  **************************************************************************************************/
 void addHandleNodeToQueue(struct HandleNode *hNode);
 struct HandleNode* getHandleNodeFromQueue(void);
-void pingWebsite(struct WebsiteElement *website);
-void* handleRequestsLoop(void *tid);
+struct WebsiteNode* getWebsiteNodeFromHandleNode(struct HandleNode *hNode);
+int pingWebsite(struct WebsiteNode *website);
+void* processRequest(void *arg);
 void printReturnCode(int rc);
 void* connectionHandler(void *sockData);
-int parseWebsiteList(char *list);
+int parseWebsiteList(char list[]);
 void handleCommand(char cmd[], char arg[], struct SocketData *sockData);
 void getHandleStatus(int handle, char *mesgOut);
 
@@ -74,16 +80,17 @@ void getHandleStatus(int handle, char *mesgOut);
  **************************************************************************************************/
 // Main function
 int main(int argc, char* argv[]) {
-    // Initialize thread pool
+    // Initialize mutex
     pthread_mutexattr_init(&init);
     pthread_mutexattr_settype(&init, PTHREAD_MUTEX_RECURSIVE_NP);
     pthread_mutex_init(&queueMutex, &init);
-    pthread_t threadPool[NUM_WORKER_THREADS];
     
-    // Create thread pool
+    // Initialize thread pool
     int i;
+    int tid[NUM_WORKER_THREADS];
     for (i=0; i<NUM_WORKER_THREADS; i++) {
-        pthread_create(&threadPool[i], NULL, handleRequestsLoop, (void*)&i);
+        tid[i] = i;
+        pthread_create(&threadPool[i], NULL, processRequest, (void*)tid);
     }
     
     // Create socket for connecting clients
@@ -135,7 +142,7 @@ int main(int argc, char* argv[]) {
             perror("Could not create a thread.\n");
             return 1;
         }
-        pthread_join(clientThread, NULL);
+        //pthread_join(clientThread, NULL);
         printf("Connected clients: %d\n", numOfConnectedClients);
     }
     
@@ -145,201 +152,6 @@ int main(int argc, char* argv[]) {
 /***************************************************************************************************
  * Definitions
  **************************************************************************************************/
-// A function for adding a requested site to the queue
-void addHandleNodeToQueue(struct HandleNode *hNode) {
-    int returnCode;
-    
-    // Lock mutex to ensure exclusive access to queue before adding HandleNode
-    returnCode = pthread_mutex_lock(&queueMutex);
-    if (returnCode) {
-        printReturnCode(returnCode);
-    }
-    
-    // If queue is empty, append first HandleNode
-    if (firstHandleInQueue == NULL) {
-        // Set queue head
-        if (handleListSize == 0) {
-            queueHead = hNode;
-        }
-        // Move first and last HandleNode in queue to next available request
-        firstHandleInQueue = lastHandleInQueue = hNode;
-    }
-    // Otherwise, append as usual
-    else {
-        lastHandleInQueue->nextHandleNode = hNode;
-        lastHandleInQueue = hNode;
-        lastHandleInQueue->nextHandleNode = NULL;
-    }
-    handleListSize++;
-    
-    // Add number of WebsiteElement requests
-    int i = 0;
-    while (hNode->websites[i] != NULL) {
-        numRequests++;
-        i++;
-    }
-    
-    pthread_cond_broadcast(&gotRequest);
-    
-    // Unlock mutex
-    returnCode = pthread_mutex_unlock(&queueMutex);
-    if (returnCode) {
-        printReturnCode(returnCode);
-    }
-    
-    // Go to handleRequestsLoop()
-    return;
-}
-
-// A function for getting a Website from queue
-struct HandleNode* getHandleNodeFromQueue(void) {
-    int returnCode;
-    
-    // Lock mutex to ensure exclusive access to queue
-    returnCode = pthread_mutex_lock(&queueMutex);
-    if (returnCode) {
-        printReturnCode(returnCode);
-    }
-    
-    struct HandleNode *hNode;
-    hNode = firstHandleInQueue;
-    if (firstHandleInQueue->nextHandleNode != NULL) {
-        firstHandleInQueue = firstHandleInQueue->nextHandleNode;
-        numRequests--;
-    }
-    
-    // Unlock mutex
-    returnCode = pthread_mutex_unlock(&queueMutex);
-    if (returnCode) {
-        printReturnCode(returnCode);
-    }
-    
-    return hNode;
-}
-
-// A function to ping (/usr/bin/ping) Website and store its data. Need 'curl' and 'ping' installed
-void pingWebsite(struct WebsiteElement *website) {
-    FILE *fp;
-    char *validateURLCmd1 = "curl -Is ";        // First part of command for URL validation
-    char *validateURLCmd2 = " | head -n 1";     // Second part of command for URL validation
-    char *ping = "/usr/bin/ping -q -c ";        // Command for pinging
-    char output[1000];                          // Output from command
-    char *parsed;                               // For parsing output
-    char *err;                                  // For parsing output
-    double pingData[4];                         // Store out ping data
-    int i;
-    
-    // First, check if URL is valid
-    char validateURLCmd[strlen(validateURLCmd1)+strlen(website->url)+strlen(validateURLCmd2)+1];
-    snprintf(
-        validateURLCmd,
-        sizeof(validateURLCmd), 
-        "%s%s%s",
-        validateURLCmd1, website->url, validateURLCmd2
-    );
-    
-    // Run curl
-    fp = popen(validateURLCmd, "r");
-    if (fp == NULL) {
-        printf("Failed to run curl. Not installed?\n");
-        return;
-    }
-    
-    // Collect data and close
-    while (fgets(output, sizeof(output), fp) != NULL) {
-        // printf("%s", output);
-    }
-    pclose(fp);
-    
-    // "curl -Is <URL> | head -n 1" returns nothing if URL is invalid
-    if (strlen(output) <= 1) {
-        strcpy(website->status, "INVALID_URL");
-        return;
-    }
-    
-    // If URL is valid, update Website status
-    strcpy(website->status, "IN_PROGRESS");
-    
-    // Build command parameters
-    char pingCmd[strlen(ping)+10+strlen(website->url)+1];
-    snprintf(pingCmd, sizeof(pingCmd), "%s %d %s", ping, NUM_PINGS_PER_SITE, website->url);
-    
-    // Run ping
-    fp = popen(pingCmd, "r");
-    if (fp == NULL) {
-        printf("Failed to run ping. Not installed?\n");
-        return;
-    }
-    // Collect data and close
-    while (fgets(output, sizeof(output), fp) != NULL) {
-        printf("%s", output);
-    }
-    pclose(fp);
-    
-    /* Parse data. Basically goes through the data and locates the double values we are looking for.
-     * For example, the ping command returns this line at the end:
-     * rtt min/avg/max/mdev = 27.848/31.269/34.939/2.907 ms
-     * Parsing the float values and converting to int will give us the data we need.
-     */
-    err = output;
-    parsed = output;
-    i = 0;
-    while (*parsed) {
-        pingData[i] = strtod(parsed, &err);
-        if (parsed == err) {
-            parsed++;
-        }
-        else if ((err == NULL) || (*err == 0)) {
-            break;
-        }
-        else {
-            parsed = err + 1;
-            i++;
-        }
-    }
-    
-    // Update Website with acquired data
-    // For pingData[i], 0 = Minimum, 1 = Average, 2 = Maximum
-    website->minPing = (int)pingData[0];
-    website->avgPing = (int)pingData[1];
-    website->maxPing = (int)pingData[2];
-    strcpy(website->status, "COMPLETE");
-    
-    numRequests--;
-    
-    // Back to handleRequestsLoop()
-    return;
-}
-
-// A loop for continuously handling requests from client
-void* handleRequestsLoop(void *tid) {
-    struct HandleNode *hNode;
-    
-    while (1) {
-        pthread_mutex_lock(&queueMutex);
-        while (!numRequests) {
-            puts("DEBUG");
-            pthread_cond_wait(&gotRequest, &queueMutex);
-        }
-        hNode = getHandleNodeFromQueue();
-        pthread_mutex_unlock(&queueMutex);
-        int i = 0;
-        while (hNode->websites[i] != NULL) {
-            //printf("Thread %ld grabbed %s\n", pthread_self(), hNode->websites[i]->url);
-            pingWebsite(hNode->websites[i]);
-            i++;
-        }
-    }
-    
-    return 0;
-}
-
-// Prints return code in case of an error
-void printReturnCode(int rc) {
-    printf("ERROR: Return code from pthread_ is %d\n", rc);
-    exit(-1);
-}
-
 // Handler routine for each client
 void* connectionHandler(void *sockData) {
     struct SocketData *socketData = (struct SocketData*)sockData;
@@ -371,7 +183,6 @@ void* connectionHandler(void *sockData) {
         i++;
         // Copy rest of mesgIn into arg
         memcpy(arg, &mesgIn[i], strlen(mesgIn));
-        
         // Process information
         handleCommand(command, arg, socketData);
         
@@ -383,7 +194,7 @@ void* connectionHandler(void *sockData) {
     }
     
     // Client disconnects
-    printf("Client %d disconnected.\n", clientID);
+    printf("Client %d disconnected.\n", socketData->clientID);
     free(socketData);
     numOfConnectedClients--;
     
@@ -440,73 +251,203 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
 }
 
 // Parses a list of websites entered by client and adds them to queue
-int parseWebsiteList(char *list) {
+int parseWebsiteList(char list[]) {
     // Parse websites from list into separate URL strings
     char *parsedURLs[MAX_WEBSITES];
-    const char *delim = ", \0";
+    const char *delim = ", \n \0";
     int i = 0;
     char *ptr;
     ptr = strtok(list, delim);
-    while ((ptr) && (i<MAX_WEBSITES)) {
+    while ((ptr) && (i<strlen(list))) {
         parsedURLs[i] = ptr;
         i++;
         ptr = strtok(NULL, delim);
     }
-    
-    // Lock mutex to ensure exclusive access to queue
-    int returnCode = 0;
-    
-    //returnCode = pthread_mutex_lock(&queueMutex);
-    //if (returnCode) {
-        //printReturnCode(returnCode);
-    //}
-    
     // Create and initialize new HandleNode
     struct HandleNode *hNode = malloc(sizeof(struct HandleNode));
     handleID++;
     hNode->handle = handleID;
+    hNode->pendingWebsiteNodes = 0;
     
-    // Create and initialize WebsiteElement and add to hNode
-    int websiteListSize = i+1;
-    for (i=0; i<websiteListSize; i++) {
-        // End of list, break
-        if (parsedURLs[i] == NULL) {
-            break;
-        }
-        
-        // Create new WebsiteNode for hNode
-        struct WebsiteElement *website = malloc(sizeof(struct WebsiteElement));
-        if (!website) {
+    // Create and initialize WebsiteNode
+    i = 0;
+    while (parsedURLs[i]) {
+        // Create new WebsiteNodes for hNode
+        struct WebsiteNode *wNode = malloc(sizeof(struct WebsiteNode));
+        if (!wNode) {
             fprintf(stderr, "addhNodeToQueue: Out of memory!\n");
             exit(1);
         }
-        
-        // Initialize WebsiteElement and add to hNode
-        website->handle = hNode->handle;
-        strcpy(website->url, parsedURLs[i]);
-        website->avgPing = -1;
-        website->minPing = -1;
-        website->maxPing = -1;
-        strcpy(website->status, "IN_QUEUE");
-        hNode->websites[i] = website;
+        // Initialize wNode and add to hNode
+        wNode->handle = hNode->handle;
+        strcpy(wNode->url, parsedURLs[i]);
+        wNode->avgPing = -1;
+        wNode->minPing = -1;
+        wNode->maxPing = -1;
+        strcpy(wNode->status, "IN_QUEUE");
+        wNode->handleNodeParent = hNode;
+        // If this is first WebsiteNode
+        if (hNode->firstWebsiteNodeInHandle == NULL) {
+            hNode->websiteHead = wNode;
+            hNode->firstWebsiteNodeInHandle = wNode;
+            hNode->lastWebsiteNodeInHandle = wNode;
+            hNode->lastWebsiteNodeInHandle->nextWebsiteNodeInHandle = NULL;
+        }
+        // Otherwise append as usual
+        else {
+            hNode->lastWebsiteNodeInHandle->nextWebsiteNodeInHandle = wNode;
+            hNode->lastWebsiteNodeInHandle = wNode;
+            hNode->lastWebsiteNodeInHandle->nextWebsiteNodeInHandle = NULL;
+        }
+        hNode->pendingWebsiteNodes++;
+        i++;
     }
+    
+    // Update global variable
+    pendingWebsiteNodes += hNode->pendingWebsiteNodes;
     
     // Add hNode to queue
     addHandleNodeToQueue(hNode);
     
-    // Unlock mutex
-    //returnCode = pthread_mutex_lock(&queueMutex);
-    //if (returnCode) {
-        //printReturnCode(returnCode);
-    //}
-    
     return handleID;
+}
+
+// A function for adding a requested site to the queue
+void addHandleNodeToQueue(struct HandleNode *hNode) {
+    int returnCode;
+    
+    // Lock mutex to ensure exclusive access to queue before adding HandleNode
+    returnCode = pthread_mutex_lock(&queueMutex);
+    if (returnCode) {
+        printReturnCode(returnCode);
+    }
+    
+    // If queue is empty, append first HandleNode
+    if (firstHandleNodeInQueue == NULL) {
+        // Set queue head
+        if (handleQueueSize == 0) {
+            queueHead = hNode;
+        }
+        // Move first and last HandleNode in queue to next available request
+        firstHandleNodeInQueue = lastHandleNodeInQueue = hNode;
+    }
+    // Otherwise, append as usual
+    else {
+        lastHandleNodeInQueue->nextHandleNodeInQueue = hNode;
+        lastHandleNodeInQueue = hNode;
+        lastHandleNodeInQueue->nextHandleNodeInQueue = NULL;
+    }
+    
+    // Update global variables & signal
+    handleQueueSize++;
+    pendingHandleNodes++;
+    pthread_cond_broadcast(&gotRequest);
+    
+    // Unlock mutex
+    returnCode = pthread_mutex_unlock(&queueMutex);
+    if (returnCode) {
+        printReturnCode(returnCode);
+    }
+    
+    return;
+}
+
+// A function for getting first HandleNode in queue
+struct HandleNode* getHandleNodeFromQueue(void) {
+    struct HandleNode *hNode = NULL;
+    
+    // If no more HandleNodes left to process
+    if (firstHandleNodeInQueue == NULL) {
+        return hNode;
+    }
+    
+    // Get first HandleNode in queue
+    hNode = firstHandleNodeInQueue;
+    // If not all websites from HandleNode have been processed, return it
+    if (hNode->pendingWebsiteNodes) {
+        return hNode;
+    }
+    else {
+        // Otherwise, get next HandleNode if it is available
+        if (hNode != lastHandleNodeInQueue) {
+            firstHandleNodeInQueue = hNode->nextHandleNodeInQueue;
+            hNode = firstHandleNodeInQueue;
+            pendingHandleNodes--;
+            return hNode;
+        }
+        // Last HandleNode reached
+        else {
+            firstHandleNodeInQueue = NULL;
+            pendingHandleNodes--;
+            return hNode;
+        }
+    }
+}
+
+// A function for getting a Website from queue
+struct WebsiteNode* getWebsiteNodeFromHandleNode(struct HandleNode *hNode) {
+    struct WebsiteNode *wNode = NULL;
+    
+    // Get available WebsiteNode
+    if (hNode->firstWebsiteNodeInHandle) {
+        wNode = hNode->firstWebsiteNodeInHandle;
+        // If there is a next WebsiteNode in HandleNode, reset firstWebsiteNodeInHandle
+        if (wNode != hNode->lastWebsiteNodeInHandle) {
+            hNode->firstWebsiteNodeInHandle = wNode->nextWebsiteNodeInHandle;
+            hNode->pendingWebsiteNodes--;
+            return wNode;
+        }
+        // Last WebsiteNode in HandleNode reached
+        else {
+            hNode->pendingWebsiteNodes--;
+            return wNode;
+        }
+    }
+    else {
+        return wNode;
+    }
+}
+
+// A loop for continuously handling requests from client
+void* processRequest(void *t) {
+    struct HandleNode *hNode = NULL;
+    struct WebsiteNode *wNode = NULL;
+    
+    while (1) {
+        // Block if no pending nodes to process
+        pthread_mutex_lock(&queueMutex);
+        while (!pendingWebsiteNodes) {
+            pthread_cond_wait(&gotRequest, &queueMutex);
+        }
+        // Website is available for processing, retrieve the first WebsiteNode
+        if ((hNode = getHandleNodeFromQueue())) {
+            if ((wNode = getWebsiteNodeFromHandleNode(hNode))) {
+                printf("Thread %ld grabbed %s.\n", pthread_self(), wNode->url);
+                pendingWebsiteNodes--;
+            }
+        }
+        pthread_mutex_unlock(&queueMutex);
+        // Prevent pinging NULL wNodes
+        if (strlen(wNode->url) > 1) {
+            pingWebsite(wNode);
+        }
+        else {
+            pthread_join(pthread_self(), NULL);
+        }
+    }
+    pthread_exit(NULL);
+}
+
+// Prints return code in case of an error
+void printReturnCode(int rc) {
+    printf("ERROR: Return code from pthread_ is %d\n", rc);
+    exit(-1);
 }
 
 // Returns status of handle requested
 void getHandleStatus(int handle, char *mesgOut) {
     struct HandleNode *queueItr = queueHead;
-    struct WebsiteElement *websiteList[MAX_WEBSITES];
+    char temp[MESG_SIZE];
     
     // Empty list
     if (queueItr == NULL) {
@@ -517,38 +458,122 @@ void getHandleStatus(int handle, char *mesgOut) {
     // Loop through queue to find websites requested by handle and store into a list
     while (queueItr != NULL) {
         if (queueItr->handle == handle) {
-            int i = 0;
-            while (queueItr->websites[i] != NULL) {
-                websiteList[i] = queueItr->websites[i];
-                puts(queueItr->websites[i]->url);
-                i++;
+            struct WebsiteNode *siteItr = queueItr->firstWebsiteNodeInHandle;
+            while (siteItr != NULL) {
+                // Store data for output
+                snprintf(
+                    temp,
+                    MESG_SIZE/MAX_WEBSITES,
+                    "%d\t%s\t\t%d\t%d\t%d\t%s\n",
+                    handle, siteItr->url, siteItr->avgPing,
+                    siteItr->minPing, siteItr->maxPing, siteItr->status
+                );
+                if (siteItr == queueItr->firstWebsiteNodeInHandle) {
+                    strcpy(mesgOut, "\n\n");
+                    strcat(mesgOut, temp);
+                }
+                else {
+                    strcat(mesgOut, temp);
+                }
+                siteItr = siteItr->nextWebsiteNodeInHandle;
             }
+            strcat(mesgOut, "\n");
             break;
         }
-        queueItr = queueItr->nextHandleNode;
+        queueItr = queueItr->nextHandleNodeInQueue;
     }
-    
-    // Store formatted status and return
-    char temp[MESG_SIZE];
-    int i = 0;
-    while (websiteList[i] != NULL) {
-        snprintf(
-            temp,
-            MESG_SIZE/MAX_WEBSITES,
-            "%d\t%s\t\t%d\t%d\t%d\t%s\n",
-            handle, websiteList[i]->url, websiteList[i]->avgPing,
-            websiteList[i]->minPing, websiteList[i]->maxPing, websiteList[i]->status
-        );
-        if (i == 0) {
-            strcpy(mesgOut, "\n\n");
-            strcat(mesgOut, temp);
-        }
-        else {
-            strcat(mesgOut, temp);
-        }
-        i++;
-    }
-    strcat(mesgOut, "\n");
     
     return;
+}
+
+// A function to ping (/usr/bin/ping) Website and store its data. Need 'curl' and 'ping' installed
+int pingWebsite(struct WebsiteNode *website) {
+    FILE *fp;
+    char *validateURLCmd1 = "curl -Is ";        // First part of command for URL validation
+    char *validateURLCmd2 = " | head -n 1";     // Second part of command for URL validation
+    char *ping = "/usr/bin/ping -q -c ";        // Command for pinging
+    char output[1000];                          // Output from command
+    char *parsed;                               // For parsing output
+    char *err;                                  // For parsing output
+    double pingData[4];                         // Store out ping data
+    int i;
+    
+    // First, check if URL is valid
+    char validateURLCmd[strlen(validateURLCmd1)+strlen(website->url)+strlen(validateURLCmd2)+1];
+    snprintf(
+        validateURLCmd,
+        sizeof(validateURLCmd), 
+        "%s%s%s",
+        validateURLCmd1, website->url, validateURLCmd2
+    );
+    
+    // Run curl
+    fp = popen(validateURLCmd, "r");
+    if (fp == NULL) {
+        printf("Failed to run curl. Not installed?\n");
+        return 0;
+    }
+    
+    // Collect data and close
+    while (fgets(output, sizeof(output), fp) != NULL) {
+        // printf("%s", output);
+    }
+    pclose(fp);
+    
+    // "curl -Is <URL> | head -n 1" returns nothing if URL is invalid
+    if (strlen(output) <= 1) {
+        strcpy(website->status, "INVALID_URL");
+        return 1;
+    }
+    
+    // If URL is valid, update Website status
+    strcpy(website->status, "IN_PROGRESS");
+    
+    // Build command parameters
+    char pingCmd[strlen(ping)+10+strlen(website->url)+1];
+    snprintf(pingCmd, sizeof(pingCmd), "%s %d %s", ping, NUM_PINGS_PER_SITE, website->url);
+    
+    // Run ping
+    fp = popen(pingCmd, "r");
+    if (fp == NULL) {
+        printf("Failed to run ping. Not installed?\n");
+        return 0;
+    }
+    // Collect data and close
+    while (fgets(output, sizeof(output), fp) != NULL) {
+        printf("%s", output);
+    }
+    pclose(fp);
+    
+    /* Parse data. Basically goes through the data and locates the double values we are looking for.
+     * For example, the ping command returns this line at the end:
+     * rtt min/avg/max/mdev = 27.848/31.269/34.939/2.907 ms
+     * Parsing the float values and converting to int will give us the data we need.
+     */
+    err = output;
+    parsed = output;
+    i = 0;
+    while (*parsed) {
+        pingData[i] = strtod(parsed, &err);
+        if (parsed == err) {
+            parsed++;
+        }
+        else if ((err == NULL) || (*err == 0)) {
+            break;
+        }
+        else {
+            parsed = err + 1;
+            i++;
+        }
+    }
+    
+    // Update Website with acquired data
+    // For pingData[i], 0 = Minimum, 1 = Average, 2 = Maximum
+    website->minPing = (int)pingData[0];
+    website->avgPing = (int)pingData[1];
+    website->maxPing = (int)pingData[2];
+    strcpy(website->status, "COMPLETE");
+    
+    // Back to handleRequestsLoop()
+    return 1;
 }
