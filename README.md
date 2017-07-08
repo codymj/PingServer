@@ -27,38 +27,38 @@ Commands:
 Design:
 -------
 
-                       firstHandleNodeInQueue             lastHandleNodeInQueue
-                                  |                                 |
-                                  v                                 v
+                           firstHandleNodeInQueue             lastHandleNodeInQueue
+                                      |                                 |
+                                      v                                 v
 
-                                  1        2        3      ...      n
-                                =====    =====    =====           =====
-                                | H | -> | H | -> | H | -> ... -> | H | -> \0
-                                =====    =====    =====           =====
-                                  |        |        |               |
-                                  v        v        v               v
-                                -----    -----    -----           -----
-firstWebsiteNodeInQueue --> 1   | W |    | W |    | W |           | W |    
-                                -----    -----    -----           -----
-                                  |        |        |               |
-                                  v        v        v               v
-                                -----    -----    -----           -----
-                            2   | W |    | W |    | W |           | W |             H - HandleNode
-                                -----    -----    -----           -----             W - WebsiteNode
-                                  |        |        |               |               n: n > 0
-                                  v        v        v               v               m: 0 < m <= 10
-                            .     .        .        .               .
-                            .     .        .        .               .
-                            .     .        .        .               .
-                                  |        |        |               |
-                                  v        v        v               v
-                                -----    -----    -----           -----
- lastWebsiteNodeInQueue --> m   | W |    | W |    | W |           | W |    
-                                -----    -----    -----           -----
-                                  |        |        |               |
-                                  v        v        v               v
-                                  
-                                  \0       \0       \0              \0
+                                      1        2        3      ...      n
+                                    =====    =====    =====           =====
+                                    | H | -> | H | -> | H | -> ... -> | H | -> \0
+                                    =====    =====    =====           =====
+                                      |        |        |               |
+                                      v        v        v               v
+                                    -----    -----    -----           -----
+    firstWebsiteNodeInQueue --> 1   | W |    | W |    | W |           | W |    
+                                    -----    -----    -----           -----
+                                      |        |        |               |
+                                      v        v        v               v
+                                    -----    -----    -----           -----
+                                2   | W |    | W |    | W |           | W |        H - HandleNode
+                                    -----    -----    -----           -----        W - WebsiteNode
+                                      |        |        |               |          n: n > 0
+                                      v        v        v               v          m: 0 < m <= 10
+                                .     .        .        .               .
+                                .     .        .        .               .
+                                .     .        .        .               .
+                                      |        |        |               |
+                                      v        v        v               v
+                                    -----    -----    -----           -----
+     lastWebsiteNodeInQueue --> m   | W |    | W |    | W |           | W |    
+                                    -----    -----    -----           -----
+                                      |        |        |               |
+                                      v        v        v               v
+                                      
+                                      \0       \0       \0              \0
 
 
 When a client enters a valid pingSites command, a HandleNode is created and added to the handle 
