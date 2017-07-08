@@ -19,13 +19,13 @@ Running:
 
 Commands:
 ---------
-    * help - Displays a list of commands and their syntax.
-    * pingSites <url list> - Up to 10 websites to ping.
-        Example: pingSites www.google.com,www.espn.com,www.gentoo.org
-    * showHandles`` - Lists the total amount of requests by all clients.
-    * showHandleStatus [integer] - Displays the status of pinged websites for that handle.
-        (Integer is optional, if left off, will display status of every handle)
-    * exit - Disconnects from the server.
+* ``help`` - Displays a list of commands and their syntax.
+* ``pingSites <url list>`` - Up to 10 websites to ping.
+    * Example: ``pingSites www.google.com,www.espn.com,www.gentoo.org``
+* ``showHandles`` - Lists the total amount of requests by all clients.
+* ``showHandleStatus [integer]`` - Displays the status of pinged websites for that handle.
+    * (``[integer]`` is optional, if left off, will display status of every handle)
+* ``exit`` - Disconnects from the server.
 
 Design:
 -------
