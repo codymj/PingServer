@@ -7,7 +7,7 @@
 
 #define SERVER_IP "127.0.0.1"   // IP of the server
 #define SERVER_PORT 3333        // Port of the server
-#define MESG_SIZE 2000          // Size of messages
+#define MESG_SIZE 9000          // Size of messages
 #define OK 0
 #define NO_INPUT 1
 #define TOO_LONG 2
@@ -25,6 +25,7 @@ int main(int argc, char* argv[]) {
     char mesgIn[MESG_SIZE];
     int rc = 0;
     char prompt[] = "Enter command> ";
+    int bytesRead = 0;
     
     // Create socket to connect to local machine server via TCP on port 3333
     clientSocket = socket(AF_INET, SOCK_STREAM, 0);
@@ -71,7 +72,7 @@ int main(int argc, char* argv[]) {
         }
         
         // Read from server
-        if (read(clientSocket, mesgIn, MESG_SIZE) <= 1) {
+        if ((bytesRead = read(clientSocket, mesgIn, MESG_SIZE)) == 0) {
             continue;
         }
         printf("%s", mesgIn);

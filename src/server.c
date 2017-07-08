@@ -11,7 +11,7 @@
 #define NUM_WORKER_THREADS 5        // Number of worker threads
 #define NUM_PINGS_PER_SITE 10       // Number of times to ping site
 #define SOCKET_LISTEN_PORT 3333     // Port for listening socket
-#define MESG_SIZE 2000              // Size of messages
+#define MESG_SIZE 9000              // Size of messages
 
 
 /***************************************************************************************************
@@ -73,7 +73,7 @@ void printReturnCode(int rc);
 void* connectionHandler(void *sockData);
 int parseWebsiteList(char list[]);
 void handleCommand(char cmd[], char arg[], struct SocketData *sockData);
-void getHandleStatus(int handle, char *mesgOut);
+void getHandleStatus(int handle, char mesgOut[]);
 
 /***************************************************************************************************
  * Main
@@ -207,6 +207,7 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
     int handle = 0;
     int socket = *(int*)sData->socketDesc;
     char mesgOut[MESG_SIZE];
+    char temp[MESG_SIZE];
     char temp1[MESG_SIZE];
     char temp2[MESG_SIZE];
     
@@ -224,28 +225,58 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
     }
     else if (strcmp(cmd, "pingSites") == 0) {
         handle = parseWebsiteList(arg);
-        strcpy(temp1, "\nYour handle for this request is: ");
+        strcpy(temp1, "Your handle for this request is: ");
         strcpy(temp2, "To view status of this request, type\n\t showHandleStatus ");
-        snprintf(mesgOut, MESG_SIZE, "%s%d\n%s%d\n\n", temp1, handle, temp2, handle);
+        snprintf(mesgOut, MESG_SIZE, "\n%s%d\n%s%d\n\n", temp1, handle, temp2, handle);
         send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
     }
     else if (strcmp(cmd, "showHandles") == 0) {
+        strcpy(temp1, "Total handles on server: ");
+        snprintf(mesgOut, MESG_SIZE, "\n%s%d\n\n", temp1, handleQueueSize);
+        send(socket,mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
     }
     else if (strcmp(cmd, "showHandleStatus") == 0) {
-        if (isdigit(arg)) {
-            handle = strtol(arg, NULL, 10);
+        // If arg is blank, return every handle's status
+        if (strlen(arg) == 0) {
+            if (handleQueueSize == 0) {
+                strcpy(mesgOut, "Nothing to show.\n");
+                send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
+                return;
+            }
+            int i = 1;
+            while (i <= handleQueueSize) {
+                getHandleStatus(i, temp);
+                strcat(mesgOut, temp);
+                memset(temp, '\0', MESG_SIZE*sizeof(char));
+                i++;
+            }
+            send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
         }
+        // Validate arg is a digit
         else {
-            strcpy(mesgOut, "\n\n\tArgument is not an integer.\n\n");
-            return;
+            int i;
+            for (i=0; i<strlen(arg); i++) {
+                if (!isdigit(arg[i])) {
+                    strcpy(mesgOut, "Argument is not an integer.\n");
+                    send(socket, mesgOut, strlen(mesgOut)+1, MSG_NOSIGNAL);
+                    return;
+                }
+            }
+            handle = atoi(arg);
+            getHandleStatus(handle, mesgOut);
+            send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
         }
-        getHandleStatus(handle, mesgOut);
-        send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
     }
     else {
         strcpy(mesgOut, "\nError: Unrecognized command.\nType 'help'\n\n");
         send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
     }
+    
+    // Clear memory buffers
+    memset(mesgOut, '\0', MESG_SIZE*sizeof(char));
+    memset(temp, '\0', MESG_SIZE*sizeof(char));
+    memset(temp1, '\0', MESG_SIZE*sizeof(char));
+    memset(temp2, '\0', MESG_SIZE*sizeof(char));
     
     return;
 }
@@ -271,7 +302,7 @@ int parseWebsiteList(char list[]) {
     
     // Create and initialize WebsiteNode
     i = 0;
-    while (parsedURLs[i]) {
+    while (parsedURLs[i] && i<10) {
         // Create new WebsiteNodes for hNode
         struct WebsiteNode *wNode = malloc(sizeof(struct WebsiteNode));
         if (!wNode) {
@@ -422,7 +453,7 @@ void* processRequest(void *t) {
         // Website is available for processing, retrieve the first WebsiteNode
         if ((hNode = getHandleNodeFromQueue())) {
             if ((wNode = getWebsiteNodeFromHandleNode(hNode))) {
-                printf("Thread %ld grabbed %s.\n", pthread_self(), wNode->url);
+                //printf("Thread %ld grabbed %s.\n", pthread_self(), wNode->url);
                 pendingWebsiteNodes--;
             }
         }
@@ -445,43 +476,45 @@ void printReturnCode(int rc) {
 }
 
 // Returns status of handle requested
-void getHandleStatus(int handle, char *mesgOut) {
-    struct HandleNode *queueItr = queueHead;
+void getHandleStatus(int handle, char mesgOut[]) {
+    struct HandleNode *hItr = queueHead;
+    struct WebsiteNode *wItr;
     char temp[MESG_SIZE];
     
-    // Empty list
-    if (queueItr == NULL) {
-        strcpy(mesgOut, "Nothing to show.\n");
+    // Validate handle is within range
+    if ((handle > handleQueueSize) || (handle < 1)) {
+        strcpy(mesgOut, "This handle doesn't exist.\n");
         return;
     }
-    
-    // Loop through queue to find websites requested by handle and store into a list
-    while (queueItr != NULL) {
-        if (queueItr->handle == handle) {
-            struct WebsiteNode *siteItr = queueItr->firstWebsiteNodeInHandle;
-            while (siteItr != NULL) {
-                // Store data for output
-                snprintf(
-                    temp,
-                    MESG_SIZE/MAX_WEBSITES,
-                    "%d\t%s\t\t%d\t%d\t%d\t%s\n",
-                    handle, siteItr->url, siteItr->avgPing,
-                    siteItr->minPing, siteItr->maxPing, siteItr->status
-                );
-                if (siteItr == queueItr->firstWebsiteNodeInHandle) {
-                    strcpy(mesgOut, "\n\n");
-                    strcat(mesgOut, temp);
-                }
-                else {
-                    strcat(mesgOut, temp);
-                }
-                siteItr = siteItr->nextWebsiteNodeInHandle;
-            }
-            strcat(mesgOut, "\n");
-            break;
-        }
-        queueItr = queueItr->nextHandleNodeInQueue;
+
+    // Go through HandleNode queue to find handle
+    while (handle != hItr->handle) {
+        hItr = hItr->nextHandleNodeInQueue;
     }
+    wItr = hItr->websiteHead;
+    // Write header for table
+    snprintf(
+        temp,
+        MESG_SIZE/MAX_WEBSITES,
+        "\n%s\t%s\t\t\t%s\t%s\t%s\t%s\n%s\n",
+        "Handle", "URL", "Avg", "Min", "Max", "Status",
+        "==================================================================="
+    );
+    strcpy(mesgOut, temp);
+    memset(temp, '\0', MESG_SIZE*sizeof(char));
+    while (wItr) {
+        // Store data for table
+        snprintf(
+            temp,
+            MESG_SIZE/MAX_WEBSITES,
+            "  %d\t%-20.20s\t%d\t%d\t%d\t%-12s\n",
+            handle, wItr->url, wItr->avgPing, wItr->minPing, wItr->maxPing, wItr->status
+        );
+        strcat(mesgOut, temp);
+        memset(temp, '\0', MESG_SIZE*sizeof(char));
+        wItr = wItr->nextWebsiteNodeInHandle;
+    }
+    strcat(mesgOut, "\n");
     
     return;
 }
@@ -521,7 +554,7 @@ int pingWebsite(struct WebsiteNode *website) {
     pclose(fp);
     
     // "curl -Is <URL> | head -n 1" returns nothing if URL is invalid
-    if (strlen(output) <= 1) {
+    if (strlen(output) == 0) {
         strcpy(website->status, "INVALID_URL");
         return 1;
     }
@@ -541,7 +574,7 @@ int pingWebsite(struct WebsiteNode *website) {
     }
     // Collect data and close
     while (fgets(output, sizeof(output), fp) != NULL) {
-        printf("%s", output);
+        //printf("%s", output);
     }
     pclose(fp);
     
@@ -572,8 +605,12 @@ int pingWebsite(struct WebsiteNode *website) {
     website->minPing = (int)pingData[0];
     website->avgPing = (int)pingData[1];
     website->maxPing = (int)pingData[2];
-    strcpy(website->status, "COMPLETE");
-    
-    // Back to handleRequestsLoop()
+    if ((website->minPing == 0) && (website->avgPing == 0) && (website->maxPing == 0)) {
+        strcpy(website->status, "BLOCKED");
+    }
+    else {
+        strcpy(website->status, "COMPLETE");
+    }
+
     return 1;
 }
