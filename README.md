@@ -2,7 +2,10 @@ PingServer
 ==========
 A server/client based implementation for pinging websites designed for the Linux operating system.
 
-Depends on curl and ping.
+Dependencies:
+-------------
+    curl
+    ping
 
 Compiling:
 ----------
