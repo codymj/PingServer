@@ -122,7 +122,7 @@ int main(int argc, char* argv[]) {
     listen(socketDesc, 2);
     
     // Accept connections
-    puts("Awaiting connections...");
+    puts("Awaiting connections...\nCtrl-C to Exit.\n");
     sockArg = sizeof(struct sockaddr_in);
     while (1) {
         newSocket = accept(socketDesc, (struct sockaddr*)&client, (socklen_t*)&sockArg);
@@ -142,7 +142,6 @@ int main(int argc, char* argv[]) {
             perror("Could not create a thread.\n");
             return 1;
         }
-        //pthread_join(clientThread, NULL);
         printf("Connected clients: %d\n", numOfConnectedClients);
     }
     
@@ -215,10 +214,10 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
         strcpy(mesgOut, ("\nAvailable commands:\n \
         * help - Display this dialog.\n \
         * pingSites <comma separated URL list>\n \
-        \t- Example: pingSites <www.google.com,www.espn.com>\n \
+        \t- Example: pingSites www.google.com,www.espn.com\n \
         \t- Up to 10 URLs are supported.\n \
         * showHandles - Displays the current pending requests from all clients.\n \
-        * showHandleStatus <integer> - (Ex. showHandleStatus 3)\n \
+        * showHandleStatus [integer] - (Ex. showHandleStatus 3)\n \
         \t- Lists the websites requested by each client and \n \
         \t  their current status.\n\n"));
         send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
@@ -239,7 +238,7 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
         // If arg is blank, return every handle's status
         if (strlen(arg) == 0) {
             if (handleQueueSize == 0) {
-                strcpy(mesgOut, "Nothing to show.\n");
+                strcpy(mesgOut, "\nNothing to show.\n\n");
                 send(socket, mesgOut, strlen(mesgOut), MSG_NOSIGNAL);
                 return;
             }
@@ -257,7 +256,7 @@ void handleCommand(char cmd[], char arg[], struct SocketData *sockData) {
             int i;
             for (i=0; i<strlen(arg); i++) {
                 if (!isdigit(arg[i])) {
-                    strcpy(mesgOut, "Argument is not an integer.\n");
+                    strcpy(mesgOut, "\nArgument is not an integer.\n\n");
                     send(socket, mesgOut, strlen(mesgOut)+1, MSG_NOSIGNAL);
                     return;
                 }
@@ -439,7 +438,7 @@ struct WebsiteNode* getWebsiteNodeFromHandleNode(struct HandleNode *hNode) {
     }
 }
 
-// A loop for continuously handling requests from client
+// A loop for continuously handling requests from clients
 void* processRequest(void *t) {
     struct HandleNode *hNode = NULL;
     struct WebsiteNode *wNode = NULL;
@@ -483,7 +482,7 @@ void getHandleStatus(int handle, char mesgOut[]) {
     
     // Validate handle is within range
     if ((handle > handleQueueSize) || (handle < 1)) {
-        strcpy(mesgOut, "This handle doesn't exist.\n");
+        strcpy(mesgOut, "\nThis handle doesn't exist.\n\n");
         return;
     }
 
