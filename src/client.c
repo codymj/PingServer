@@ -83,7 +83,8 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-// Function to get a line from stdin and prefer buffer overflow
+/* Function to get a line from stdin and prevent buffer overflow
+ **************************************************************************************************/
 static int getLine(char prompt[], char buffer[], int size) {
     int ch, extra;
     
@@ -92,10 +93,8 @@ static int getLine(char prompt[], char buffer[], int size) {
         printf("%s", prompt);
         fflush(stdout);
     }
-    
     // Get input
     fgets(buffer, size, stdin);
-    
     // Handle input
     if (strcmp(buffer, "exit\n") == 0) {
         return EXIT;
@@ -103,7 +102,6 @@ static int getLine(char prompt[], char buffer[], int size) {
     if (strcmp(buffer, "\n") == 0 || buffer == NULL) {
         return NO_INPUT;
     }
-    
     // Ensure newline
     if (buffer[strlen(buffer) - 1] != '\n') {
         extra = 0;
