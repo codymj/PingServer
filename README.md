@@ -41,7 +41,7 @@ Design:
                                       |        |        |               |
                                       v        v        v               v
                                     -----    -----    -----           -----
-    firstWebsiteNodeInQueue --> 1   | W |    | W |    | W |           | W |    
+    firstWebsiteNodeInQueue --> 1    | W |    | W |    | W |           | W |    
                                     -----    -----    -----           -----
                                       |        |        |               |
                                       v        v        v               v
